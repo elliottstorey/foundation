@@ -1,0 +1,14 @@
+[project]
+name = "foundation"
+version = "0.1.0"
+description = "A lightweight CLI for managing Docker services with automatic reverse proxying and SSL termination."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "typer>=0.21.1",
+]
+
+[dependency-groups]
+dev = [
+    "pyinstaller>=6.18.0",
+]
