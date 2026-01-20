@@ -1,6 +1,7 @@
 import json
 import shutil
 import subprocess
+import socket
 from pathlib import Path
 from enum import Enum
 from typing import Annotated
@@ -19,6 +20,19 @@ services_compose_path = services_path / "compose.json"
 console = Console()
 
 app = typer.Typer(name="foundation", help="A lightweight CLI for managing Docker services with automatic reverse proxying and SSL termination.", no_args_is_help=True)
+
+def check_ports_available():
+    ports = [80, 443]
+    for port in ports:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            try:
+                sock.bind(("0.0.0.0", port))
+            except OSError:
+                console.print(f"[red]Error: Port {port} is already in use by another process.[/red]")
+                console.print(f"Please stop any web servers (e.g., Apache, Nginx) using port {port} and try again.")
+                return False
+    return True
 
 def get_foundation_compose():
     if not foundation_compose_path.is_file(): return
@@ -174,6 +188,9 @@ def install(default_email: Annotated[str, typer.Option(help="The email address t
     services = services_compose.get("services", {})
     volumes = services_compose.get("volumes", {})
 
+    if not check_ports_available():
+        raise typer.Exit(code=1)
+
     if not docker_installed(): install_docker()
     if not git_installed(): install_git()
     if not railpack_installed(): install_railpack()
@@ -273,6 +290,10 @@ def update():
 def deploy():
     services_compose = get_services_compose()
 
+    if not foundation_running():
+        if not check_ports_available():
+            raise typer.Exit(code=1)
+
     with console.status("Ensuring foundation is running..."):
         subprocess.run(["docker", "compose", "-f", foundation_compose_path, "up", "-d"], capture_output=True, check=True)
     print("Foundation is deployed.")
@@ -307,7 +328,7 @@ def status():
         status = "[red]Down[/red]"
         host = "Not Defined"
 
-        result = subprocess.run(["docker", "compose", "ps", "-a", name, "--format", "json"], capture_output=True, text=True)
+        result = subprocess.run(["docker", "compose", "-f", services_compose_path, "ps", "-a", name, "--format", "json"], capture_output=True, text=True)
         if result.stdout.strip():
             container_info = json.loads(result.stdout.splitlines()[0])
             created_at = container_info.get("CreatedAt", "Unknown")
