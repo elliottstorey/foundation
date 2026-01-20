@@ -210,7 +210,9 @@ def install(default_email: Annotated[str, typer.Option(help="The email address t
                 "acme": {}
             },
             "networks": {
-                "foundation_network": {}
+                "foundation_network": {
+                    "name": "foundation_network"
+                }
             }
         }
 
