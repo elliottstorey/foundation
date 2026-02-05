@@ -29,7 +29,7 @@ jobs:
         run: uv sync
 
       - name: Build with PyInstaller
-        run: uv run pyinstaller --onefile src/foundation.py
+        run: uv run pyinstaller --onefile --hidden-import="shellingham.posix" --hidden-import="shellingham.nt" src/foundation.py
 
       - name: Create Release and Upload Asset
         uses: softprops/action-gh-release@v1
