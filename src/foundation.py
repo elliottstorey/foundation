@@ -204,7 +204,7 @@ class Output:
     @staticmethod
     def error(message, next_message=None, next_command=None, exception=None, exit=True):
         console.quiet = False
-        
+
         if exception: console.print_exception(show_locals=True)
         console.print(f"[bold red]Error:[/] {message}.")
         if next_command and next_message:
@@ -291,7 +291,7 @@ def init(
         volumes = {}
 
     proxy_compose = {
-        "name": "foundation",
+        "name": "foundation-proxy",
         "services": {
             "nginx-proxy": {
                 "container_name": "nginx-proxy",
@@ -323,7 +323,7 @@ def init(
     }
 
     services_compose = {
-        "name": "foundation services",
+        "name": "foundation-services",
         "services": services,
         "volumes": volumes,
         "networks": {
