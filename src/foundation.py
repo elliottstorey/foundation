@@ -427,10 +427,11 @@ def create(
     if Git.is_url(source):
         with console.status("Cloning repository..."):
             try:
+                shutil.rmtree(service_dir, ignore_errors=True)
                 Git.clone(source, service_dir)
                 Output.success("Repository cloned")
             except Exception as e:
-                Output.error("Could not clone repository", "Check URL, network, and permissions", exception=e)
+                Output.error("Could not clone repository", "check URL, network, and permissions", exception=e)
 
     service_compose = {
         "container_name": service_name,
