@@ -435,7 +435,7 @@ def create(
     service_compose = {
         "container_name": service_name,
         **({
-            "build": service_dir
+            "build": str(service_dir)
         } if dockerfile_path.is_file() else {
             "image": f"foundation/{service_name}" if service_dir.is_dir() else source
         }),
