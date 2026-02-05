@@ -205,13 +205,22 @@ class Output:
     def error(message, next_message=None, next_command=None, exception=None, exit=True):
         console.quiet = False
 
-        if exception: console.print_exception(show_locals=True)
+        if isinstance(exception, subprocess.CalledProcessError):
+            if exception.stderr:
+                console.print(f"[red]{exception.stderr.decode().strip()}[/]")
+            elif exception.stdout:
+                console.print(f"[red]{exception.stdout.decode().strip()}[/]")
+        elif exception:
+            console.print_exception(show_locals=True)
+
         console.print(f"[bold red]Error:[/] {message}.")
         if next_command and next_message:
             console.print(f"Try running [bold cyan]{APP_NAME} {next_command}[/] to {next_message}.")
         elif next_message:
-            console.print(f"Try to {next_message}.")
-        if exit: raise typer.Exit(code=1)
+            console.print(f"Try to {next_message}.")\
+
+        if exit:
+            raise typer.Exit(code=1)
 
 def port_available(port):
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
