@@ -188,8 +188,12 @@ console = Console()
 
 class Output:
     @staticmethod
-    def info(message, exit=False):
+    def info(message, next_message=None, next_command=None, exit=False):
         console.print(f"{message}.")
+        if next_command and next_message:
+            console.print(f"Try running [bold cyan]{APP_NAME} {next_command}[/] to {next_message}.")
+        elif next_message:
+            console.print(f"Try to {next_message}.")
         if exit: raise typer.Exit()
 
     @staticmethod
