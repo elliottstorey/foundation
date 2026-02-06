@@ -118,7 +118,7 @@ class Docker:
         subprocess.run(list(filter(None, ["docker", "compose", "-f", compose_path, "up", service_name, "--detach", "--remove-orphans"])), capture_output=True, check=True)
 
     def compose_down(compose_path):
-        subprocess.run(list(filter(None, ["docker", "compose", "-f", compose_path, "down", "--detach", "--remove-orphans"])), capture_output=True, check=True)
+        subprocess.run(list(filter(None, ["docker", "compose", "-f", compose_path, "down", "--remove-orphans"])), capture_output=True, check=True)
 
 class Git:
     @staticmethod
@@ -360,7 +360,7 @@ def init(
         try:
             Docker.write_compose(PROXY_PATH, proxy_compose)
             Docker.write_compose(SERVICES_PATH, services_compose)
-            Output.success("Updated configuration files!")
+            Output.success("Updated configuration files")
         except Exception as e:
             Output.error("Could not update configuration files", exception=e)
 
@@ -506,7 +506,7 @@ def delete(
     with console.status("Updating configuration files..."):
         try:
             Docker.write_compose(SERVICES_PATH, services_compose)
-            Output.success("Updated configuration files!")
+            Output.success("Updated configuration files")
         except Exception as e:
             Output.error("Could not update configuration files", exception=e)
 
