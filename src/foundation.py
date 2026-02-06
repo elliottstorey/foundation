@@ -8,7 +8,6 @@ from typing import Annotated
 import typer
 from rich.console import Console
 from rich.table import Table
-from rich import box
 
 APP_NAME = "foundation"
 APP_DIR = typer.get_app_dir(APP_NAME)
@@ -379,10 +378,7 @@ def status():
     if not services_status:
         Output.info("No services defined", "add a service", "create", exit=True)
 
-    table = Table(
-        title=f"{len(services_status)} Services",
-        box=box.ROUNDED
-    )
+    table = Table(title=f"Services" if len(service_status) == 1 else f"{len(services_status)} Services")
     table.add_column("Name", style ="bold italic")
     table.add_column("Status")
     table.add_column("Uptime", style="dim")
