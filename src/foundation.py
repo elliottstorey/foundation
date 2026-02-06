@@ -198,7 +198,7 @@ class Output:
 
     @staticmethod
     def success(message, next_message=None, next_command=None, exit=False):
-        console.print(f"[bold green]Success:[/] {message}.")
+        console.print(f"[bold green]Success:[/] {message}!")
         if next_command and next_message:
             console.print(f"Try running [bold cyan]{APP_NAME} {next_command}[/] to {next_message}.")
         elif next_message:
@@ -468,7 +468,7 @@ def create(
     with console.status("Updating configuration files..."):
         try:
             Docker.write_compose(SERVICES_PATH, services_compose)
-            Output.success("Updated configuration files!")
+            Output.success("Updated configuration files")
         except Exception as e:
             Output.error("Could not update configuration files", exception=e)
 
