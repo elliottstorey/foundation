@@ -124,6 +124,6 @@ $ foundation deploy [OPTIONS] [NAME]
 
 **Options**:
 
-* `--quiet`: Do not show logs while deploying.
+* `--report-success / --no-report-success`: [default: report-success]
 * `--help`: Show this message and exit.
 

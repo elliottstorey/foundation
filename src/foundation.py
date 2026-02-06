@@ -588,13 +588,13 @@ def deploy(
             except Exception as e:
                 Output.error(f"Could not update service [bold italic]{name}[/]" if name else "Could not update services", "check the logs above", exception=e)
 
-    with console.status(f"{"Starting" if name in services else "Updating"} service [bold italic]{name}[/]..." if name else "Starting services..."):
+    with console.status(f"{'Starting' if name in services else 'Updating'} service [bold italic]{name}[/]..." if name else "Starting services..."):
         try:
             Docker.compose_up(SERVICES_PATH)
             if report_success:
                 Output.success("Deployment complete", "view running services", "status")
         except Exception as e:
-            Output.error(f"Could not {"Start" if name in services else "Update"} service [bold italic]{name}[/]" if name else "Could not start services", "check the logs above", exception=e)
+            Output.error(f"Could not {'Start' if name in services else 'Update'} service [bold italic]{name}[/]" if name else "Could not start services", "check the logs above", exception=e)
 
 if __name__ == "__main__":
     app()
