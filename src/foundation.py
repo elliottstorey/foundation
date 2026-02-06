@@ -458,7 +458,7 @@ def create(
             **dict(env.split("=", 1) for env in environment),
             **({
                 **({ "VIRTUAL_HOST": virtual_host } if virtual_host else {}),
-                **({ "VIRTUAL_PORT": virtual_port } if virtual_host else {}),
+                **({ "VIRTUAL_PORT": virtual_port } if virtual_host and virtual_port else {}),
                 **({ "LETSENCRYPT_HOST": virtual_host } if virtual_host else {}),
                 **({ "LETSENCRYPT_EMAIL": letsencrypt_email } if letsencrypt_email else {})
             } if virtual_host else {})
