@@ -592,51 +592,140 @@ def deploy(
         except Exception as e:
             Output.error(f"Could not {'Start' if name in services else 'Update'} service [bold italic]{name}[/]" if name else "Could not start services", "check the logs above", exception=e)
 
-@app.command(help="Create a permanent redirect from one domain to another.")
-def redirect(
-    name: Annotated[str, typer.Argument(help="Name of the redirect service.")],
-    virtual_host: Annotated[str, typer.Option("--domain", help="The public domain name to redirect FROM.", prompt="Domain to redirect FROM")],
-    target_url: Annotated[str, typer.Option("--target", help="The URL to redirect TO (e.g., https://new.com).", prompt="URL to redirect TO")],
-    letsencrypt_email: Annotated[str, typer.Option("--email", help="Email address used for Let's Encrypt SSL registration.")] = None
+# Create the sub-app and attach it to the main CLI
+domain_app = typer.Typer(help="Manage domains, SSL, and redirects.", no_args_is_help=True)
+app.add_typer(domain_app, name="domain")
+
+@domain_app.command("add", help="Attach a domain to an existing service.")
+def domain_add(
+    name: Annotated[str, typer.Argument(help="Name of the service.")],
+    domain: Annotated[str, typer.Argument(help="The public domain name to attach.")],
+    port: Annotated[int, typer.Option("--port", "-p", help="The internal container port to proxy to.")] = None,
+    email: Annotated[str, typer.Option("--email", help="Email address for Let's Encrypt SSL.")] = None
 ):
-    service_name = name
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+
+    if not service:
+        Output.error(f"Service [bold italic]{name}[/] not found")
+
+    env = service.setdefault("environment", {})
+
+    # nginx-proxy supports multiple domains if separated by commas.
+    # We split, add the new domain, and rejoin to avoid wiping out existing domains.
+    v_hosts = set(filter(None, env.get("VIRTUAL_HOST", "").split(",")))
+    v_hosts.add(domain)
+    env["VIRTUAL_HOST"] = ",".join(sorted(v_hosts))
+
+    le_hosts = set(filter(None, env.get("LETSENCRYPT_HOST", "").split(",")))
+    le_hosts.add(domain)
+    env["LETSENCRYPT_HOST"] = ",".join(sorted(le_hosts))
+
+    if port:
+        env["VIRTUAL_PORT"] = str(port)
+    if email:
+        env["LETSENCRYPT_EMAIL"] = email
+
+    with console.status("Updating configuration files..."):
+        try:
+            Docker.write_compose(SERVICES_PATH, services_compose)
+        except Exception as e:
+            Output.error("Could not update configuration files", exception=e)
+
+    try:
+        deploy(name, report_success=False)
+        Output.success(f"Domain [bold cyan]{domain}[/] attached to [bold italic]{name}[/]")
+    except Exception:
+        pass
+
+
+@domain_app.command("remove", help="Detach a domain from a service.")
+def domain_remove(
+    name: Annotated[str, typer.Argument(help="Name of the service.")],
+    domain: Annotated[str, typer.Argument(help="The public domain name to remove.")]
+):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+
+    if not service:
+        Output.error(f"Service [bold italic]{name}[/] not found")
+
+    env = service.get("environment", {})
+
+    # Safely remove the domain from the comma-separated list
+    v_hosts = set(filter(None, env.get("VIRTUAL_HOST", "").split(",")))
+    if domain in v_hosts:
+        v_hosts.remove(domain)
+        if v_hosts:
+            env["VIRTUAL_HOST"] = ",".join(sorted(v_hosts))
+        else:
+            env.pop("VIRTUAL_HOST", None)
+
+    le_hosts = set(filter(None, env.get("LETSENCRYPT_HOST", "").split(",")))
+    if domain in le_hosts:
+        le_hosts.remove(domain)
+        if le_hosts:
+            env["LETSENCRYPT_HOST"] = ",".join(sorted(le_hosts))
+        else:
+            env.pop("LETSENCRYPT_HOST", None)
+
+    with console.status("Updating configuration files..."):
+        try:
+            Docker.write_compose(SERVICES_PATH, services_compose)
+        except Exception as e:
+            Output.error("Could not update configuration files", exception=e)
+
+    try:
+        deploy(name, report_success=False)
+        Output.success(f"Domain [bold cyan]{domain}[/] removed from [bold italic]{name}[/]")
+    except Exception:
+        pass
+
+
+@domain_app.command("redirect", help="Create a permanent redirect from one domain to another.")
+def domain_redirect(
+    from_domain: Annotated[str, typer.Argument(help="The public domain name to redirect FROM.")],
+    target_url: Annotated[str, typer.Argument(help="The URL to redirect TO (e.g., https://new.com).")],
+    email: Annotated[str, typer.Option("--email", help="Email address for Let's Encrypt SSL.")] = None
+):
     services_compose = Docker.get_compose(SERVICES_PATH)
     services = services_compose.get("services", {})
 
-    if service_name in services:
-        Output.error(f"Service [bold italic]{service_name}[/] already exists", "delete it first", f"delete {service_name}")
+    # Automatically generate a hidden service name based on the domain
+    safe_name = f"redirect-{from_domain.replace('.', '-')}"
 
-    # Generate a lightweight Nginx config string (using {{ and }} to escape Python f-string braces)
-    # rstrip('/') ensures we don't get double slashes when $request_uri (which starts with '/') is appended
-    nginx_conf = f"server {{ listen 80; return 301 {target_url.rstrip('/')}$request_uri; }}"
+    if safe_name in services:
+        Output.error(f"Redirect for [bold cyan]{from_domain}[/] already exists", "delete it first", f"delete {safe_name}")
+
+    # Use $$request_uri to escape Docker Compose variable substitution
+    nginx_conf = f"server {{ listen 80; return 301 {target_url.rstrip('/')}$$request_uri; }}"
 
     service_compose = {
-        "container_name": service_name,
+        "container_name": safe_name,
         "image": "nginx:alpine",
         "command": ["/bin/sh", "-c", f"echo '{nginx_conf}' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"],
         "environment": {
-            "VIRTUAL_HOST": virtual_host,
-            "LETSENCRYPT_HOST": virtual_host,
-            **({ "LETSENCRYPT_EMAIL": letsencrypt_email } if letsencrypt_email else {})
+            "VIRTUAL_HOST": from_domain,
+            "LETSENCRYPT_HOST": from_domain,
+            **({ "LETSENCRYPT_EMAIL": email } if email else {})
         },
         "networks": ["foundation_network"],
         "restart": "unless-stopped"
     }
 
-    services_compose.setdefault("services", {})[service_name] = service_compose
+    services_compose.setdefault("services", {})[safe_name] = service_compose
 
     with console.status("Updating configuration files..."):
         try:
             Docker.write_compose(SERVICES_PATH, services_compose)
-            Output.success("Updated configuration files")
         except Exception as e:
             Output.error("Could not update configuration files", exception=e)
 
     try:
-        deploy(service_name, report_success=False)
-        Output.success(f"Redirect [bold italic]{service_name}[/] created", "view its status", "status")
+        deploy(safe_name, report_success=False)
+        Output.success(f"Redirect [bold cyan]{from_domain}[/] ➔ [bold cyan]{target_url}[/] created")
     except Exception:
         pass
-
+    
 if __name__ == "__main__":
     app()
