@@ -249,7 +249,7 @@ def main(ctx: typer.Context):
         Output.error("Docker is not running", "start Docker")
     
     if not Docker.permissions():
-        Output.error("Docker permission denied", "re-running with sudo")
+        Output.error("Docker permission denied", "re-run with sudo")
 
     if not Git.installed():
         Output.error("Git is not installed", "install all dependencies", "init")
@@ -591,6 +591,52 @@ def deploy(
                 Output.success("Deployment complete", "view running services", "status")
         except Exception as e:
             Output.error(f"Could not {'Start' if name in services else 'Update'} service [bold italic]{name}[/]" if name else "Could not start services", "check the logs above", exception=e)
+
+@app.command(help="Create a permanent redirect from one domain to another.")
+def redirect(
+    name: Annotated[str, typer.Argument(help="Name of the redirect service.")],
+    virtual_host: Annotated[str, typer.Option("--domain", help="The public domain name to redirect FROM.", prompt="Domain to redirect FROM")],
+    target_url: Annotated[str, typer.Option("--target", help="The URL to redirect TO (e.g., https://new.com).", prompt="URL to redirect TO")],
+    letsencrypt_email: Annotated[str, typer.Option("--email", help="Email address used for Let's Encrypt SSL registration.")] = None
+):
+    service_name = name
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    services = services_compose.get("services", {})
+
+    if service_name in services:
+        Output.error(f"Service [bold italic]{service_name}[/] already exists", "delete it first", f"delete {service_name}")
+
+    # Generate a lightweight Nginx config string (using {{ and }} to escape Python f-string braces)
+    # rstrip('/') ensures we don't get double slashes when $request_uri (which starts with '/') is appended
+    nginx_conf = f"server {{ listen 80; return 301 {target_url.rstrip('/')}$request_uri; }}"
+
+    service_compose = {
+        "container_name": service_name,
+        "image": "nginx:alpine",
+        "command": ["/bin/sh", "-c", f"echo '{nginx_conf}' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"],
+        "environment": {
+            "VIRTUAL_HOST": virtual_host,
+            "LETSENCRYPT_HOST": virtual_host,
+            **({ "LETSENCRYPT_EMAIL": letsencrypt_email } if letsencrypt_email else {})
+        },
+        "networks": ["foundation_network"],
+        "restart": "unless-stopped"
+    }
+
+    services_compose.setdefault("services", {})[service_name] = service_compose
+
+    with console.status("Updating configuration files..."):
+        try:
+            Docker.write_compose(SERVICES_PATH, services_compose)
+            Output.success("Updated configuration files")
+        except Exception as e:
+            Output.error("Could not update configuration files", exception=e)
+
+    try:
+        deploy(service_name, report_success=False)
+        Output.success(f"Redirect [bold italic]{service_name}[/] created", "view its status", "status")
+    except Exception:
+        pass
 
 if __name__ == "__main__":
     app()
