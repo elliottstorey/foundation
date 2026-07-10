@@ -694,6 +694,9 @@ def domain_redirect(
     # Automatically generate a hidden service name based on the domain
     safe_name = f"redirect-{from_domain.replace('.', '-')}"
 
+    if not target_url.startswith(("http://", "https://")):
+        target_url = f"https://{target_url}"
+
     if safe_name in services:
         Output.error(f"Redirect for [bold cyan]{from_domain}[/] already exists", "delete it first", f"delete {safe_name}")
 
@@ -726,6 +729,6 @@ def domain_redirect(
         Output.success(f"Redirect [bold cyan]{from_domain}[/] ➔ [bold cyan]{target_url}[/] created")
     except Exception:
         pass
-    
+
 if __name__ == "__main__":
     app()
