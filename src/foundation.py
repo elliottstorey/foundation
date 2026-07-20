@@ -15,6 +15,19 @@ PROXY_PATH = Path(APP_DIR) / "compose.json"
 SERVICES_DIR = Path(APP_DIR) / "services"
 SERVICES_PATH = SERVICES_DIR / "compose.json"
 
+ctx_settings = {"help_option_names": ["-h", "--help"]}
+
+app = typer.Typer(name=APP_NAME, help="CLI tool for managing Docker services with automatic reverse proxying and SSL termination.", context_settings=ctx_settings, no_args_is_help=True)
+env_app = typer.Typer(help="Manage environment variables.", context_settings=ctx_settings, no_args_is_help=True)
+volume_app = typer.Typer(help="Manage persistent storage volumes.", context_settings=ctx_settings, no_args_is_help=True)
+domain_app = typer.Typer(help="Manage domains, SSL, and redirects.", context_settings=ctx_settings, no_args_is_help=True)
+
+app.add_typer(env_app, name="env")
+app.add_typer(volume_app, name="volume")
+app.add_typer(domain_app, name="domain")
+
+console = Console()
+
 class Docker:
     @staticmethod
     def installed():
@@ -53,7 +66,7 @@ class Docker:
         try:
             subprocess.run(["docker", "manifest", "inspect", source], capture_output=True, check=True, timeout=20)
             return True
-        except Exception as e:
+        except Exception:
             return False
         
     @staticmethod
@@ -65,11 +78,8 @@ class Docker:
     def get_compose_status(compose_path):
         compose = Docker.get_compose(compose_path)
         services = compose.get("services", {})
-
         result = subprocess.run(["docker", "compose", "--file", compose_path, "ps", "--all", "--format", "{{json .}}"], capture_output=True, text=True, check=True)
-
         services_status = [json.loads(line) for line in result.stdout.strip().split("\n") if line]
-        
         services_status = {service_status.get("Service"): service_status for service_status in services_status}
 
         return {
@@ -82,10 +92,10 @@ class Docker:
     
     @staticmethod
     def write_compose(compose_path, compose):
-        compose = json.dumps(compose, indent=2)
-        subprocess.run(["docker", "compose", "--file", "-", "config"], input=compose, capture_output=True, text=True, check=True)
+        compose_str = json.dumps(compose, indent=2)
+        subprocess.run(["docker", "compose", "--file", "-", "config"], input=compose_str, capture_output=True, text=True, check=True)
         compose_path.parent.mkdir(parents=True, exist_ok=True)
-        compose_path.write_text(compose, encoding="utf-8")
+        compose_path.write_text(compose_str, encoding="utf-8")
 
     @staticmethod
     def build(tag, service_dir):
@@ -101,21 +111,22 @@ class Docker:
         subprocess.run([
             "docker", "buildx", "build",
             "--build-arg", "BUILDKIT_SYNTAX=ghcr.io/railwayapp/railpack-frontend",
-            "--tag", tag,
-            "--file", railpack_plan_path,
-            service_dir,
-            "--load"
+            "--tag", tag, "--file", railpack_plan_path, service_dir, "--load"
         ], capture_output=True, check=True)
 
+    @staticmethod
     def compose_build(compose_path, service_name=None):
         subprocess.run(list(filter(None, ["docker", "compose", "-f", compose_path, "build", service_name])), capture_output=True, check=True)
     
+    @staticmethod
     def compose_pull(compose_path, service_name=None):
         subprocess.run(list(filter(None, ["docker", "compose", "-f", compose_path, "pull", service_name])), capture_output=True, check=True)
 
+    @staticmethod
     def compose_up(compose_path, service_name=None):
         subprocess.run(list(filter(None, ["docker", "compose", "-f", compose_path, "up", service_name, "--detach", "--remove-orphans"])), capture_output=True, check=True)
 
+    @staticmethod
     def compose_down(compose_path):
         subprocess.run(list(filter(None, ["docker", "compose", "-f", compose_path, "down", "--remove-orphans"])), capture_output=True, check=True)
 
@@ -181,15 +192,6 @@ class Railpack:
     def prepare(service_dir, plan_out):
         subprocess.run(["railpack", "prepare", service_dir, "--plan-out", plan_out], capture_output=True, check=True)
 
-app = typer.Typer(
-    name="foundation",
-    help="CLI tool for managing Docker services with automatic reverse proxying and SSL termination.",
-    context_settings={"help_option_names": ["-h", "--help"]},
-    no_args_is_help=True
-)
-
-console = Console()
-
 class Output:
     @staticmethod
     def info(message, next_message=None, next_command=None, exit=False):
@@ -212,17 +214,10 @@ class Output:
     @staticmethod
     def error(message, next_message=None, next_command=None, exception=None, exit=True):
         console.quiet = False
-
         if isinstance(exception, subprocess.CalledProcessError):
-            stderr = exception.stderr
-            stdout = exception.stdout
-            
-            if stderr:
-                msg = stderr.decode().strip() if isinstance(stderr, bytes) else stderr.strip()
-                console.print(f"[red]{msg}[/]")
-            elif stdout:
-                msg = stdout.decode().strip() if isinstance(stdout, bytes) else stdout.strip()
-                console.print(f"[red]{msg}[/]")
+            stderr, stdout = exception.stderr, exception.stdout
+            if stderr: console.print(f"[red]{stderr.decode().strip() if isinstance(stderr, bytes) else stderr.strip()}[/]")
+            elif stdout: console.print(f"[red]{stdout.decode().strip() if isinstance(stdout, bytes) else stdout.strip()}[/]")
         elif exception:
             console.print_exception(show_locals=True)
 
@@ -230,36 +225,31 @@ class Output:
         if next_command and next_message:
             console.print(f"Try running [bold cyan]{APP_NAME} {next_command}[/] to {next_message}.")
         elif next_message:
-            console.print(f"Try to {next_message}.")\
+            console.print(f"Try to {next_message}.")
+        if exit: raise typer.Exit(code=1)
 
-        if exit:
-            raise typer.Exit(code=1)
+class RestartPolicy(str, Enum):
+    no = "no"
+    always = "always"
+    on_failure = "on-failure"
+    unless_stopped = "unless-stopped"
 
-def port_available(port):
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        return sock.connect_ex(("0.0.0.0", port)) != 0
+def detect_gpu_environment():
+    if shutil.which("nvidia-smi"): return "nvidia"
+    if Path("/dev/kfd").exists() and Path("/dev/dri").exists(): return "amd"
+    if Path("/dev/dri").exists(): return "intel"
+    return None
 
 @app.callback()
 def main(ctx: typer.Context):
     if ctx.invoked_subcommand in [None, "init"]: return
 
-    if not Docker.installed():
-        Output.error("Docker is not installed", "install all dependencies", "init")
-    
-    if not Docker.running():
-        Output.error("Docker is not running", "start Docker")
-    
-    if not Docker.permissions():
-        Output.error("Docker permission denied", "re-run with sudo")
-
-    if not Git.installed():
-        Output.error("Git is not installed", "install all dependencies", "init")
-    
-    if not Railpack.installed():
-        Output.error("Railpack is not installed", "install all dependencies", "init")
-
-    if not PROXY_PATH.is_file() or not SERVICES_PATH.is_file():
-        Output.error("Foundation is not initialised", "setup the environment", "init")
+    if not Docker.installed(): Output.error("Docker is not installed", "install all dependencies", "init")
+    if not Docker.running(): Output.error("Docker is not running", "start Docker")
+    if not Docker.permissions(): Output.error("Docker permission denied", "re-run with sudo")
+    if not Git.installed(): Output.error("Git is not installed", "install all dependencies", "init")
+    if not Railpack.installed(): Output.error("Railpack is not installed", "install all dependencies", "init")
+    if not PROXY_PATH.is_file() or not SERVICES_PATH.is_file(): Output.error("Foundation is not initialised", "setup the environment", "init")
 
     try:
         Docker.get_compose(PROXY_PATH)
@@ -275,33 +265,24 @@ def main(ctx: typer.Context):
     except Exception:
         Output.error("Reverse proxy is not running", "restart it", "deploy")
 
-@app.command(help="Install all dependencies and start the reverse proxy.")
-def init(
-    default_email: Annotated[str, typer.Option(help="Default email address used for Let's Encrypt SSL registration.", prompt="Default email address for Let's Encrypt SSL registration")]
-):
+# --- CORE SYSTEM ---
+
+@app.command(help="Install dependencies and start the proxy.")
+def init(default_email: Annotated[str, typer.Option(help="Default email address used for Let's Encrypt SSL.", prompt="Default Let's Encrypt email")]):
     if not Docker.installed():
         with console.status("Installing Docker..."):
-            try:
-                Docker.install()
-                Output.success("Docker installed!")
-            except Exception as e:
-                Output.error("Could not install Docker", "re-run or try again", exception=e)
+            try: Docker.install(); Output.success("Docker installed!")
+            except Exception as e: Output.error("Could not install Docker", exception=e)
 
     if not Git.installed():
         with console.status("Installing Git..."):
-            try:
-                Git.install()
-                Output.success("Git installed!")
-            except Exception as e:
-                Output.error("Could not install Git", "re-run or try again", exception=e)
+            try: Git.install(); Output.success("Git installed!")
+            except Exception as e: Output.error("Could not install Git", exception=e)
     
     if not Railpack.installed():
         with console.status("Installing Railpack..."):
-            try:
-                Railpack.install()
-                Output.success("Railpack installed!")
-            except Exception as e:
-                Output.error("Could not install Railpack", "re-run or try again", exception=e)
+            try: Railpack.install(); Output.success("Railpack installed!")
+            except Exception as e: Output.error("Could not install Railpack", exception=e)
  
     try:
         services_compose = Docker.get_compose(SERVICES_PATH)
@@ -309,8 +290,7 @@ def init(
         volumes = services_compose.get("volumes", {})
         Output.info("Using existing configuration files")
     except Exception:
-        services = {}
-        volumes = {}
+        services, volumes = {}, {}
 
     proxy_compose = {
         "name": "foundation-proxy",
@@ -318,11 +298,7 @@ def init(
             "nginx-proxy": {
                 "container_name": "nginx-proxy",
                 "image": "nginxproxy/nginx-proxy",
-                "volumes": [
-                    "certs:/etc/nginx/certs",
-                    "html:/usr/share/nginx/html",
-                    "/var/run/docker.sock:/tmp/docker.sock:ro"
-                ],
+                "volumes": ["certs:/etc/nginx/certs", "html:/usr/share/nginx/html", "/var/run/docker.sock:/tmp/docker.sock:ro"],
                 "ports": ["80:80", "443:443"],
                 "networks": ["foundation_network"],
                 "restart": "unless-stopped"
@@ -331,10 +307,7 @@ def init(
                 "container_name": "nginx-proxy-acme",
                 "image": "nginxproxy/acme-companion",
                 "environment": {"DEFAULT_EMAIL": default_email},
-                "volumes": [
-                    "/var/run/docker.sock:/var/run/docker.sock:ro",
-                    "acme:/etc/acme.sh"
-                ],
+                "volumes": ["/var/run/docker.sock:/var/run/docker.sock:ro", "acme:/etc/acme.sh"],
                 "volumes_from": ["nginx-proxy"],
                 "networks": ["foundation_network"],
                 "restart": "unless-stopped"
@@ -346,14 +319,8 @@ def init(
 
     services_compose = {
         "name": "foundation-services",
-        "services": services,
-        "volumes": volumes,
-        "networks": {
-            "foundation_network": {
-                "external": True,
-                "name": "foundation_network"
-            }
-        }
+        "services": services, "volumes": volumes,
+        "networks": {"foundation_network": {"external": True, "name": "foundation_network"}}
     }
 
     with console.status("Updating configuration files..."):
@@ -361,375 +328,332 @@ def init(
             Docker.write_compose(PROXY_PATH, proxy_compose)
             Docker.write_compose(SERVICES_PATH, services_compose)
             Output.success("Updated configuration files")
-        except Exception as e:
-            Output.error("Could not update configuration files", exception=e)
+        except Exception as e: Output.error("Could not update configuration files", exception=e)
 
     with console.status("Deploying changes..."):
-        try:
-            deploy(report_success=False)
-            Output.success("foundation initialised", "create your first service", "create")
-        except Exception:
-            pass
+        try: deploy(report_success=False); Output.success("Foundation initialised", "create your first service", "create")
+        except Exception: pass
 
-@app.command(help="View the status, uptime, and URLs of all services.")
-def status():
-    services_compose = Docker.get_compose(SERVICES_PATH)
-    services_status = Docker.get_compose_status(SERVICES_PATH)
-
-    if not services_status:
-        Output.info("No services defined", "add a service", "create", exit=True)
-
-    table = Table(title=f"Services" if len(services_status) == 1 else f"{len(services_status)} Services")
-    table.add_column("Name", style ="bold italic")
-    table.add_column("Status")
-    table.add_column("Uptime", style="dim")
-    table.add_column("Domain")
-
-    for service_name, service_status in services_status.items():
-        state = service_status.get("state", "-")
-        state = f"[green]{state}[/]" if state == "running" else f"[red]{state}[/]"
-        uptime = service_status.get("status", "-")
-        host = services_compose.get("services", {}).get(service_name, {}).get("environment", {}).get("VIRTUAL_HOST")
-        host = f"[link=https://{host}]{host}[/]" if host else "-"
-        table.add_row(service_name, state, uptime, host)
-
-    console.print(table)
-
-def environment_callback(value):
-    if any("=" not in env for env in value):
-        raise typer.BadParameter("Must be in KEY=VALUE format")
-    return value
-
-def volumes_callback(value):
-    if any(":" not in volume for volume in value):
-        raise typer.BadParameter("Must be in VOLUME:PATH format")
-    if any(volume.startswith(("/", ".", "~")) for volume in value):
-        raise typer.BadParameter("Must use named volumes")
-    return value
-
-class RestartPolicy(str, Enum):
-    no = "no"
-    always = "always"
-    on_failure = "on-failure"
-    unless_stopped = "unless-stopped"
-
-@app.command(help="Add a new service from a Git repo or Docker image.")
+@app.command(help="Create a new service interactively.")
 def create(
     name: Annotated[str, typer.Argument(help="Name of the service to create.")],
-    source: Annotated[str, typer.Option("--repo", "--image", help="Git repository or Docker image.", prompt="Git repository or Docker image")],
-    virtual_host: Annotated[str, typer.Option("--domain", help="The public domain name to proxy to this service.")] = None,
-    virtual_port: Annotated[int, typer.Option("--internal-port", help="The internal container port to be proxied.")] = None,
-    letsencrypt_email: Annotated[str, typer.Option("--email", help="Email address used for Let's Encrypt SSL registration.")] = None,
-    environment: Annotated[list[str], typer.Option("--env", "-e", metavar="KEY=VALUE", help="Environment variables to pass into the service container.", callback=environment_callback)] = [],
-    volumes: Annotated[list[str], typer.Option("--volume", "-v", metavar="VOLUME:PATH", help="Volume mappings to pass into the service container.", callback=volumes_callback)] = [],
-    restart_policy: Annotated[RestartPolicy, typer.Option("--restart", help="Restart policy for the service.")] = RestartPolicy.unless_stopped,
-    gpu: Annotated[bool, typer.Option("--gpu", help="Enable NVIDIA GPU access for the service container.")] = False
+    source: Annotated[str, typer.Option("--source", help="Git repository or Docker image.", prompt="Git repository or Docker image")]
 ):
-    service_name = name
     services_compose = Docker.get_compose(SERVICES_PATH)
-    services = services_compose.get("services", {})
+    if name in services_compose.get("services", {}):
+        Output.error(f"Service [bold italic]{name}[/] already exists", "delete it first", f"delete {name}")
 
-    if service_name in services:
-        Output.error(f"Service [bold italic]{service_name}[/] already exists", "delete it first", f"delete {service_name}")
-
-    service_dir = SERVICES_DIR / service_name
-    dockerfile_path = service_dir / "Dockerfile"
-
+    service_dir = SERVICES_DIR / name
     if Git.is_url(source):
         with console.status("Cloning repository..."):
-            try:
-                shutil.rmtree(service_dir, ignore_errors=True)
-                Git.clone(source, service_dir)
-                Output.success("Repository cloned")
-            except Exception as e:
-                Output.error("Could not clone repository", "check URL, network, and permissions", exception=e)
+            try: shutil.rmtree(service_dir, ignore_errors=True); Git.clone(source, service_dir); Output.success("Repository cloned")
+            except Exception as e: Output.error("Could not clone repository", exception=e)
 
     service_compose = {
-        "container_name": service_name,
-        **({
-            "build": str(service_dir)
-        } if dockerfile_path.is_file() else {
-            "image": f"foundation/{service_name}" if service_dir.is_dir() else source
-        }),
-        "environment": {
-            **dict(env.split("=", 1) for env in environment),
-            **({
-                **({ "VIRTUAL_HOST": virtual_host } if virtual_host else {}),
-                **({ "VIRTUAL_PORT": virtual_port } if virtual_host and virtual_port else {}),
-                **({ "LETSENCRYPT_HOST": virtual_host } if virtual_host else {}),
-                **({ "LETSENCRYPT_EMAIL": letsencrypt_email } if virtual_host and letsencrypt_email else {})
-            } if virtual_host else {})
-        },
-        "volumes": volumes,
-        "networks": ["foundation_network"],
-        "restart": restart_policy.value,
-        **({
-            "deploy": {"resources":{"reservations":{"devices":[{"driver": "nvidia", "count": "all", "capabilities": ["gpu"]}]}}}
-        } if gpu else {})
-    }
-
-    services_compose.setdefault("services", {})[service_name] = service_compose
-    services_compose.setdefault("volumes", {}).update({ volume.split(":")[0]: {} for volume in volumes })
-
-    with console.status("Updating configuration files..."):
-        try:
-            Docker.write_compose(SERVICES_PATH, services_compose)
-            Output.success("Updated configuration files")
-        except Exception as e:
-            Output.error("Could not update configuration files", exception=e)
-
-    try:
-        deploy(service_name, report_success=False)
-        Output.success(f"Service [bold italic]{service_name}[/] created", "view its status", "status")
-    except Exception:
-        pass
-
-@app.command(help="Permanently remove a service and its configuration.")
-def delete(
-    name: Annotated[str, typer.Argument(help="Name of the service to delete.")]
-):
-    service_name = name
-    services_compose = Docker.get_compose(SERVICES_PATH)
-    services = services_compose.get("services", {})
-    service_dir = SERVICES_DIR / service_name
-
-    if service_name not in services:
-        Output.success(f"Service [bold italic]{service_name}[/] is not defined", "create it first", f"create {service_name}", exit=True)
-
-    services.pop(service_name, None)
-
-    services_compose["services"] = services
-
-    with console.status("Updating configuration files..."):
-        try:
-            Docker.write_compose(SERVICES_PATH, services_compose)
-            Output.success("Updated configuration files")
-        except Exception as e:
-            Output.error("Could not update configuration files", exception=e)
-
-    with console.status("Cleaning up files..."):
-        try:
-            shutil.rmtree(service_dir, ignore_errors=True)
-            Output.success("Cleaned up files")
-        except Exception as e:
-            Output.error("Could not clean up files", exception=e)
-
-    try:
-        deploy(service_name, report_success=False)
-        Output.success(f"Service [bold italic]{service_name}[/] deleted", "view remaining services", "status")
-    except Exception:
-        pass
-
-@app.command(help="Build and start services. Use this to apply changes.", hidden=True)
-def deploy(
-    name: Annotated[str, typer.Argument(help="Name of the service to deploy.")] = None,
-    report_success: bool = True
-):
-    services_compose = Docker.get_compose(SERVICES_PATH)
-    services = services_compose.get("services", {})
-
-    for service_name, service in services.items():
-        if name and service_name != name: continue
-
-        service_dir = SERVICES_DIR / service_name
-        build = service.get("build")
-        image = service.get("image", "")
-
-        if build or image == f"foundation/{service_name}":
-            with console.status(f"Updating repository for service [bold italic]{service_name}[/]..."):
-                try:
-                    Git.reset(service_dir)
-                    Output.success(f"Updated repository for service [bold italic]{service_name}[/]")
-                except Exception as e:
-                    Output.error(f"Could not update repository for service [bold italic]{service_name}[/]", "check remote access and permissions", exception=e)
-
-        if build:
-            with console.status(f"Building service [bold italic]{service_name}[/] from Dockerfile..."):
-                try:
-                    Docker.compose_build(SERVICES_PATH, service_name)
-                    Output.success(f"Built service [bold italic]{service_name}[/]")
-                except Exception as e:
-                    Output.error(f"Could not build service [bold italic]{service_name}[/]", "make sure that the Dockerfile is valid", exception=e)
-        elif image == f"foundation/{service_name}":
-            with console.status(f"Building service [bold italic]{service_name}[/] from source..."):
-                try:
-                    railpack_plan_path = service_dir / "railpack-plan.json"
-                    Railpack.prepare(service_dir, railpack_plan_path)
-                    Docker.build_from_railpack_plan(f"foundation/{service_name}", service_dir, railpack_plan_path)
-                    Output.success(f"Built service [bold italic]{service_name}[/]")
-                except Exception as e:
-                    Output.error(f"Could not build service [bold italic]{service_name}[/]", exception=e)
-        else:
-            with console.status(f"Pulling service [bold italic]{service_name}[/]..."):
-                try:
-                    Docker.compose_pull(SERVICES_PATH, service_name)
-                    Output.success(f"Pulled service [bold italic]{service_name}[/]")
-                except Exception as e:
-                    Output.error(f"Could not pull service [bold italic]{service_name}[/]", "make sure that the image is valid", exception=e)
-
-    with console.status("Starting reverse proxy..."):
-        try:
-            Docker.compose_up(PROXY_PATH)
-            if report_success:
-                Output.success("Started the reverse proxy")
-        except Exception as e:
-            Output.error("Could not start reverse proxy", "check the logs above", exception=e)
-
-    if not services:
-        with console.status(f"Updating service [bold italic]{name}[/]..." if name else "Updating services..."):
-            try:
-                Docker.compose_down(SERVICES_PATH)
-                if report_success:
-                    Output.success("Deployment complete", "view running services", "status")
-                return
-            except Exception as e:
-                Output.error(f"Could not update service [bold italic]{name}[/]" if name else "Could not update services", "check the logs above", exception=e)
-
-    with console.status(f"{'Starting' if name in services else 'Updating'} service [bold italic]{name}[/]..." if name else "Starting services..."):
-        try:
-            Docker.compose_up(SERVICES_PATH)
-            if report_success:
-                Output.success("Deployment complete", "view running services", "status")
-        except Exception as e:
-            Output.error(f"Could not {'Start' if name in services else 'Update'} service [bold italic]{name}[/]" if name else "Could not start services", "check the logs above", exception=e)
-
-# Create the sub-app and attach it to the main CLI
-domain_app = typer.Typer(help="Manage domains, SSL, and redirects.", no_args_is_help=True)
-app.add_typer(domain_app, name="domain")
-
-@domain_app.command("add", help="Attach a domain to an existing service.")
-def domain_add(
-    name: Annotated[str, typer.Argument(help="Name of the service.")],
-    domain: Annotated[str, typer.Argument(help="The public domain name to attach.")],
-    port: Annotated[int, typer.Option("--port", "-p", help="The internal container port to proxy to.")] = None,
-    email: Annotated[str, typer.Option("--email", help="Email address for Let's Encrypt SSL.")] = None
-):
-    services_compose = Docker.get_compose(SERVICES_PATH)
-    service = services_compose.get("services", {}).get(name)
-
-    if not service:
-        Output.error(f"Service [bold italic]{name}[/] not found")
-
-    env = service.setdefault("environment", {})
-
-    # nginx-proxy supports multiple domains if separated by commas.
-    # We split, add the new domain, and rejoin to avoid wiping out existing domains.
-    v_hosts = set(filter(None, env.get("VIRTUAL_HOST", "").split(",")))
-    v_hosts.add(domain)
-    env["VIRTUAL_HOST"] = ",".join(sorted(v_hosts))
-
-    le_hosts = set(filter(None, env.get("LETSENCRYPT_HOST", "").split(",")))
-    le_hosts.add(domain)
-    env["LETSENCRYPT_HOST"] = ",".join(sorted(le_hosts))
-
-    if port:
-        env["VIRTUAL_PORT"] = str(port)
-    if email:
-        env["LETSENCRYPT_EMAIL"] = email
-
-    with console.status("Updating configuration files..."):
-        try:
-            Docker.write_compose(SERVICES_PATH, services_compose)
-        except Exception as e:
-            Output.error("Could not update configuration files", exception=e)
-
-    try:
-        deploy(name, report_success=False)
-        Output.success(f"Domain [bold cyan]{domain}[/] attached to [bold italic]{name}[/]")
-    except Exception:
-        pass
-
-
-@domain_app.command("remove", help="Detach a domain from a service.")
-def domain_remove(
-    name: Annotated[str, typer.Argument(help="Name of the service.")],
-    domain: Annotated[str, typer.Argument(help="The public domain name to remove.")]
-):
-    services_compose = Docker.get_compose(SERVICES_PATH)
-    service = services_compose.get("services", {}).get(name)
-
-    if not service:
-        Output.error(f"Service [bold italic]{name}[/] not found")
-
-    env = service.get("environment", {})
-
-    # Safely remove the domain from the comma-separated list
-    v_hosts = set(filter(None, env.get("VIRTUAL_HOST", "").split(",")))
-    if domain in v_hosts:
-        v_hosts.remove(domain)
-        if v_hosts:
-            env["VIRTUAL_HOST"] = ",".join(sorted(v_hosts))
-        else:
-            env.pop("VIRTUAL_HOST", None)
-
-    le_hosts = set(filter(None, env.get("LETSENCRYPT_HOST", "").split(",")))
-    if domain in le_hosts:
-        le_hosts.remove(domain)
-        if le_hosts:
-            env["LETSENCRYPT_HOST"] = ",".join(sorted(le_hosts))
-        else:
-            env.pop("LETSENCRYPT_HOST", None)
-
-    with console.status("Updating configuration files..."):
-        try:
-            Docker.write_compose(SERVICES_PATH, services_compose)
-        except Exception as e:
-            Output.error("Could not update configuration files", exception=e)
-
-    try:
-        deploy(name, report_success=False)
-        Output.success(f"Domain [bold cyan]{domain}[/] removed from [bold italic]{name}[/]")
-    except Exception:
-        pass
-
-
-@domain_app.command("redirect", help="Create a permanent redirect from one domain to another.")
-def domain_redirect(
-    from_domain: Annotated[str, typer.Argument(help="The public domain name to redirect FROM.")],
-    target_url: Annotated[str, typer.Argument(help="The URL to redirect TO (e.g., https://new.com).")],
-    email: Annotated[str, typer.Option("--email", help="Email address for Let's Encrypt SSL.")] = None
-):
-    services_compose = Docker.get_compose(SERVICES_PATH)
-    services = services_compose.get("services", {})
-
-    # Automatically generate a hidden service name based on the domain
-    safe_name = f"redirect-{from_domain.replace('.', '-')}"
-
-    if not target_url.startswith(("http://", "https://")):
-        target_url = f"https://{target_url}"
-
-    if safe_name in services:
-        Output.error(f"Redirect for [bold cyan]{from_domain}[/] already exists", "delete it first", f"delete {safe_name}")
-
-    # Use $$request_uri to escape Docker Compose variable substitution
-    nginx_conf = f"server {{ listen 80; return 301 {target_url.rstrip('/')}$$request_uri; }}"
-
-    service_compose = {
-        "container_name": safe_name,
-        "image": "nginx:alpine",
-        "command": ["/bin/sh", "-c", f"echo '{nginx_conf}' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"],
-        "environment": {
-            "VIRTUAL_HOST": from_domain,
-            "LETSENCRYPT_HOST": from_domain,
-            **({ "LETSENCRYPT_EMAIL": email } if email else {})
-        },
+        "container_name": name,
+        **({"build": str(service_dir)} if (service_dir / "Dockerfile").is_file() else {"image": f"foundation/{name}" if service_dir.is_dir() else source}),
         "networks": ["foundation_network"],
         "restart": "unless-stopped"
     }
 
-    services_compose.setdefault("services", {})[safe_name] = service_compose
-
+    services_compose.setdefault("services", {})[name] = service_compose
     with console.status("Updating configuration files..."):
-        try:
-            Docker.write_compose(SERVICES_PATH, services_compose)
-        except Exception as e:
-            Output.error("Could not update configuration files", exception=e)
+        try: Docker.write_compose(SERVICES_PATH, services_compose); Output.success("Updated configuration files")
+        except Exception as e: Output.error("Could not update configuration files", exception=e)
 
-    try:
-        deploy(safe_name, report_success=False)
-        Output.success(f"Redirect [bold cyan]{from_domain}[/] ➔ [bold cyan]{target_url}[/] created")
-    except Exception:
-        pass
+    try: deploy(name, report_success=False); Output.success(f"Service [bold italic]{name}[/] created", "view its status", f"status {name}")
+    except Exception: pass
+
+@app.command(help="Update container resources and hardware allocation.")
+def update(
+    name: Annotated[str, typer.Argument(help="Name of the service.")],
+    restart_policy: Annotated[RestartPolicy, typer.Option("--restart", help="Restart policy")] = None,
+    cpus: Annotated[str, typer.Option("--cpus", help="Floating limit on CPUs (e.g., '1.5')")] = None,
+    cpuset: Annotated[str, typer.Option("--cpuset", help="Pin to specific CPU cores (e.g., '0,3')")] = None,
+    memory: Annotated[str, typer.Option("--memory", help="Hard limit on memory (e.g., '2G')")] = None,
+    gpu: Annotated[bool, typer.Option("--gpu/--no-gpu", help="Auto-detect and enable/disable GPU")] = None,
+    gpu_devices: Annotated[str, typer.Option("--gpu-devices", help="Specific GPUs to use (e.g., 'all', '1', 'GPU-xyz')")] = "all"
+):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+    if not service: Output.error(f"Service [bold italic]{name}[/] not found")
+
+    if restart_policy: service["restart"] = restart_policy.value
+    if cpuset: service["cpuset"] = cpuset
+
+    deploy_block = service.setdefault("deploy", {})
+    resources = deploy_block.setdefault("resources", {})
+    
+    if cpus or memory:
+        limits = resources.setdefault("limits", {})
+        if cpus: limits["cpus"] = cpus
+        if memory: limits["memory"] = memory
+
+    if gpu is not None:
+        resources.pop("reservations", None)
+        service["devices"] = [d for d in service.get("devices", []) if not d.startswith(("/dev/dri", "/dev/kfd"))]
+        if not service["devices"]: service.pop("devices", None)
+
+        if gpu:
+            vendor = detect_gpu_environment()
+            if vendor == "nvidia":
+                res = resources.setdefault("reservations", {})
+                dev_cfg = {"driver": "nvidia", "capabilities": ["gpu"]}
+                if gpu_devices.startswith("GPU-"): dev_cfg["device_ids"] = [gpu_devices]
+                elif "," in gpu_devices: dev_cfg["device_ids"] = gpu_devices.split(",")
+                else: dev_cfg["count"] = gpu_devices
+                res["devices"] = [dev_cfg]
+            elif vendor in ["amd", "intel"]:
+                nodes = [""] if gpu_devices == "all" else gpu_devices.split(",")
+                for node in nodes: service.setdefault("devices", []).append(f"/dev/dri{'/renderD'+node if node else ''}:/dev/dri{'/renderD'+node if node else ''}")
+                if vendor == "amd": service.setdefault("devices", []).append("/dev/kfd:/dev/kfd")
+            else: Output.error("Could not auto-detect a supported GPU on this host.")
+
+    if not resources: deploy_block.pop("resources", None)
+    if not deploy_block: service.pop("deploy", None)
+
+    with console.status("Applying updates..."):
+        Docker.write_compose(SERVICES_PATH, services_compose)
+    deploy(name)
+
+@app.command(help="Permanently remove a service and its configuration.")
+def delete(name: Annotated[str, typer.Argument(help="Name of the service to delete.")]):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    if name not in services_compose.get("services", {}): Output.success(f"Service [bold italic]{name}[/] not defined", exit=True)
+    services_compose["services"].pop(name, None)
+    with console.status("Cleaning up..."):
+        Docker.write_compose(SERVICES_PATH, services_compose)
+        shutil.rmtree(SERVICES_DIR / name, ignore_errors=True)
+    try: deploy(name, report_success=False); Output.success(f"Service [bold italic]{name}[/] deleted", "view remaining", "status")
+    except Exception: pass
+
+@app.command(help="View global dashboard or inspect a specific service.")
+def status(name: Annotated[str, typer.Argument(help="Specific service to inspect.")] = None):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    services = services_compose.get("services", {})
+    services_status = Docker.get_compose_status(SERVICES_PATH)
+
+    if not services: Output.info("No services defined", "add a service", "create", exit=True)
+
+    if name:
+        if name not in services: Output.error(f"Service [bold italic]{name}[/] not found")
+        svc = services[name]
+        state = services_status.get(name, {}).get("state", "-")
+        color = "green" if state == "running" else "red"
+        
+        console.print(f"\n[bold {color}]■ {name}[/]")
+        console.print(f"  [dim]Status:[/] [{color}]{state}[/] ({services_status.get(name, {}).get('status', '-')})")
+        
+        if "VIRTUAL_HOST" in svc.get("environment", {}):
+            console.print(f"  [dim]Domains:[/] {svc['environment']['VIRTUAL_HOST']}")
+            
+        envs = {k:v for k,v in svc.get("environment", {}).items() if k not in ["VIRTUAL_HOST", "LETSENCRYPT_HOST", "LETSENCRYPT_EMAIL", "VIRTUAL_PORT"]}
+        if envs:
+            console.print("  [dim]Environment:[/]")
+            for k, v in envs.items(): console.print(f"    - {k}={v}")
+            
+        if svc.get("volumes"):
+            console.print("  [dim]Volumes:[/]")
+            for v in svc["volumes"]: console.print(f"    - {v}")
+            
+        if "deploy" in svc or "devices" in svc:
+            console.print("  [dim]Hardware Resources Allocated[/]")
+        console.print("")
+        return
+
+    table = Table(title="Global Dashboard")
+    table.add_column("Name", style="bold italic")
+    table.add_column("Status")
+    table.add_column("Uptime", style="dim")
+    table.add_column("Domain")
+
+    for s_name, s_status in services_status.items():
+        state = s_status.get("state", "-")
+        state = f"[green]{state}[/]" if state == "running" else f"[red]{state}[/]"
+        host = services.get(s_name, {}).get("environment", {}).get("VIRTUAL_HOST")
+        if host and s_name.startswith("redirect-"): host = f"[dim]{host} ➔ Redirect[/]"
+        elif host: host = f"[link=https://{host.split(',')[0]}]{host.split(',')[0]}[/link]"
+        table.add_row(s_name, state, s_status.get("status", "-"), host or "-")
+
+    console.print(table)
+
+@app.command(help="Build and start services. Pulls latest code/image.")
+def deploy(name: Annotated[str, typer.Argument(help="Name of the service to deploy.")] = None, report_success: bool = True):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    services = services_compose.get("services", {})
+
+    for s_name, service in services.items():
+        if name and s_name != name: continue
+        s_dir, build, image = SERVICES_DIR / s_name, service.get("build"), service.get("image", "")
+
+        if build or image == f"foundation/{s_name}":
+            with console.status(f"Updating repository for [bold italic]{s_name}[/]..."):
+                try: Git.reset(s_dir)
+                except Exception as e: Output.error(f"Could not update repository for [bold italic]{s_name}[/]", exception=e)
+
+        if build:
+            with console.status(f"Building [bold italic]{s_name}[/]..."): Docker.compose_build(SERVICES_PATH, s_name)
+        elif image == f"foundation/{s_name}":
+            with console.status(f"Building [bold italic]{s_name}[/] from source..."):
+                Railpack.prepare(s_dir, s_dir / "railpack-plan.json")
+                Docker.build_from_railpack_plan(f"foundation/{s_name}", s_dir, s_dir / "railpack-plan.json")
+        else:
+            with console.status(f"Pulling [bold italic]{s_name}[/]..."): Docker.compose_pull(SERVICES_PATH, s_name)
+
+    with console.status("Starting reverse proxy..."):
+        try: Docker.compose_up(PROXY_PATH)
+        except Exception as e: Output.error("Could not start reverse proxy", exception=e)
+
+    if not services:
+        with console.status("Updating services..."): Docker.compose_down(SERVICES_PATH)
+        if report_success: Output.success("Deployment complete", "view running services", "status")
+        return
+
+    with console.status(f"{'Starting' if name in services else 'Updating'} services..."):
+        try: Docker.compose_up(SERVICES_PATH)
+        except Exception as e: Output.error("Could not start services", exception=e)
+        if report_success: Output.success("Deployment complete", "view running services", "status")
+        
+    subprocess.run(["docker", "image", "prune", "-f"], capture_output=True) # Cleanup detached layers silently
+
+@app.command(help="Stream live logs for a service.")
+def logs(name: Annotated[str, typer.Argument()], follow: bool = typer.Option(True, "--follow", "-f")):
+    cmd = ["docker", "compose", "-f", SERVICES_PATH, "logs", "--tail=100"]
+    if follow: cmd.append("-f")
+    cmd.append(name)
+    subprocess.run(cmd)
+
+@app.command(help="Drop into a service's terminal.")
+def shell(name: Annotated[str, typer.Argument()]):
+    if subprocess.run(["docker", "exec", "-it", name, "/bin/bash"]).returncode != 0:
+        subprocess.run(["docker", "exec", "-it", name, "/bin/sh"])
+
+@app.command(help="Execute a one-off command inside a service.")
+def exec(name: Annotated[str, typer.Argument()], command: Annotated[str, typer.Argument(help="Command to run (e.g. 'ls -la')")]):
+    subprocess.run(["docker", "exec", "-it", name] + command.split())
+
+# --- DOMAIN SUB-APP ---
+
+@domain_app.command("add", help="Attach a domain to a service.")
+def domain_add(name: str, domain: str, port: int = typer.Option(None, "-p", "--port"), email: str = typer.Option(None, "--email")):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+    if not service: Output.error(f"Service [bold italic]{name}[/] not found")
+
+    env = service.setdefault("environment", {})
+    for key in ["VIRTUAL_HOST", "LETSENCRYPT_HOST"]:
+        hosts = set(filter(None, env.get(key, "").split(",")))
+        hosts.add(domain)
+        env[key] = ",".join(sorted(hosts))
+
+    if port: env["VIRTUAL_PORT"] = str(port)
+    if email: env["LETSENCRYPT_EMAIL"] = email
+
+    with console.status("Updating..."): Docker.write_compose(SERVICES_PATH, services_compose)
+    deploy(name, report_success=False)
+    Output.success(f"Domain [bold cyan]{domain}[/] attached to [bold italic]{name}[/]")
+
+@domain_app.command("remove", help="Detach a domain from a service.")
+def domain_remove(name: str, domain: str):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+    if not service: Output.error(f"Service [bold italic]{name}[/] not found")
+
+    env = service.get("environment", {})
+    for key in ["VIRTUAL_HOST", "LETSENCRYPT_HOST"]:
+        hosts = set(filter(None, env.get(key, "").split(",")))
+        if domain in hosts:
+            hosts.remove(domain)
+            if hosts: env[key] = ",".join(sorted(hosts))
+            else: env.pop(key, None)
+
+    with console.status("Updating..."): Docker.write_compose(SERVICES_PATH, services_compose)
+    deploy(name, report_success=False)
+    Output.success(f"Domain [bold cyan]{domain}[/] removed from [bold italic]{name}[/]")
+
+@domain_app.command("redirect", help="Create a permanent redirect.")
+def domain_redirect(from_domain: str, target_url: str, email: str = typer.Option(None, "--email")):
+    if not target_url.startswith(("http://", "https://")): target_url = f"https://{target_url}"
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    safe_name = f"redirect-{from_domain.replace('.', '-')}"
+    if safe_name in services_compose.get("services", {}): Output.error(f"Redirect for [bold]{from_domain}[/] exists")
+
+    nginx_conf = f"server {{ listen 80; return 301 {target_url.rstrip('/')}$$request_uri; }}"
+    services_compose.setdefault("services", {})[safe_name] = {
+        "container_name": safe_name, "image": "nginx:alpine",
+        "command": ["/bin/sh", "-c", f"echo '{nginx_conf}' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"],
+        "environment": {"VIRTUAL_HOST": from_domain, "LETSENCRYPT_HOST": from_domain, **({"LETSENCRYPT_EMAIL": email} if email else {})},
+        "networks": ["foundation_network"], "restart": "unless-stopped"
+    }
+    with console.status("Updating..."): Docker.write_compose(SERVICES_PATH, services_compose)
+    deploy(safe_name, report_success=False)
+    Output.success(f"Redirect [bold cyan]{from_domain}[/] ➔ [bold cyan]{target_url}[/] created")
+
+# --- ENV SUB-APP ---
+
+@env_app.command("add", help="Add or update environment variables.")
+def env_add(name: str, vars: Annotated[list[str], typer.Argument(help="KEY=VALUE pairs")]):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+    if not service: Output.error(f"Service [bold italic]{name}[/] not found")
+
+    env = service.setdefault("environment", {})
+    for v in vars:
+        if "=" not in v: Output.error(f"Invalid format for '{v}'", "use KEY=VALUE")
+        k, val = v.split("=", 1)
+        env[k] = val
+
+    with console.status("Updating..."): Docker.write_compose(SERVICES_PATH, services_compose)
+    deploy(name, report_success=False)
+    Output.success(f"Environment updated for [bold italic]{name}[/]")
+
+@env_app.command("remove", help="Remove an environment variable.")
+def env_remove(name: str, key: str):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+    if not service: Output.error(f"Service [bold italic]{name}[/] not found")
+
+    if key in service.get("environment", {}):
+        service["environment"].pop(key)
+        if not service["environment"]: service.pop("environment")
+        with console.status("Updating..."): Docker.write_compose(SERVICES_PATH, services_compose)
+        deploy(name, report_success=False)
+        Output.success(f"Removed [bold]{key}[/] from [bold italic]{name}[/]")
+    else:
+        Output.info(f"Variable [bold]{key}[/] not found in [bold italic]{name}[/]")
+
+# --- VOLUME SUB-APP ---
+
+@volume_app.command("add", help="Mount a persistent volume.")
+def volume_add(name: str, volume_map: Annotated[str, typer.Argument(help="Format: volume_name:/container/path")]):
+    if ":" not in volume_map or volume_map.startswith(("/", ".", "~")): Output.error("Invalid volume format", "use name:/path")
+    vol_name, vol_path = volume_map.split(":", 1)
+    
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+    if not service: Output.error(f"Service [bold italic]{name}[/] not found")
+
+    vols = service.setdefault("volumes", [])
+    if volume_map not in vols: vols.append(volume_map)
+    services_compose.setdefault("volumes", {})[vol_name] = {}
+
+    with console.status("Updating..."): Docker.write_compose(SERVICES_PATH, services_compose)
+    deploy(name, report_success=False)
+    Output.success(f"Volume [bold]{vol_name}[/] mounted to [bold italic]{name}[/]")
+
+@volume_app.command("remove", help="Unmount a volume.")
+def volume_remove(name: str, volume_name: str):
+    services_compose = Docker.get_compose(SERVICES_PATH)
+    service = services_compose.get("services", {}).get(name)
+    if not service: Output.error(f"Service [bold italic]{name}[/] not found")
+
+    vols = service.get("volumes", [])
+    service["volumes"] = [v for v in vols if not v.startswith(f"{volume_name}:")]
+    if not service["volumes"]: service.pop("volumes")
+
+    with console.status("Updating..."): Docker.write_compose(SERVICES_PATH, services_compose)
+    deploy(name, report_success=False)
+    Output.success(f"Volume [bold]{volume_name}[/] removed from [bold italic]{name}[/]")
 
 if __name__ == "__main__":
     app()
