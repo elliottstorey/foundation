@@ -184,6 +184,7 @@ class Railpack:
 app = typer.Typer(
     name="foundation",
     help="CLI tool for managing Docker services with automatic reverse proxying and SSL termination.",
+    context_settings={"help_option_names": ["-h", "--help"]},
     no_args_is_help=True
 )
 
