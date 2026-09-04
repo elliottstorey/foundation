@@ -170,6 +170,8 @@ class Git:
         result = subprocess.run(["git", "rev-list", "--count", "HEAD..@{u}"], cwd=service_dir, capture_output=True, text=True, check=True)
         if int(result.stdout.strip()) > 0:
             subprocess.run(["git", "reset", "--hard", "@{u}"], cwd=service_dir)
+            return True
+        return False
 
 class Railpack:
     @staticmethod
@@ -486,7 +488,11 @@ def status(name: Annotated[str, typer.Argument(help="Specific service to inspect
     console.print(table)
 
 @app.command(help="Build and start services. Pulls latest code/image.")
-def deploy(name: Annotated[str, typer.Argument(help="Name of the service to deploy.")] = None, report_success: bool = True):
+def deploy(
+    name: Annotated[str, typer.Argument(help="Name of the service to deploy.")] = None,
+    force: bool = typer.Option(False, "--force", "-f", help="Force rebuild even if no changes"),
+    report_success: bool = True
+):
     services_compose = Docker.get_compose(SERVICES_PATH)
     services = services_compose.get("services", {})
 
@@ -494,17 +500,28 @@ def deploy(name: Annotated[str, typer.Argument(help="Name of the service to depl
         if name and s_name != name: continue
         s_dir, build, image = SERVICES_DIR / s_name, service.get("build"), service.get("image", "")
 
+        # 1. Pull code and track if changes were made
+        code_updated = False
         if build or image == f"foundation/{s_name}":
             with console.status(f"Updating repository for [bold italic]{s_name}[/]..."):
-                try: Git.reset(s_dir)
-                except Exception as e: Output.error(f"Could not update repository for [bold italic]{s_name}[/]", exception=e)
+                try: 
+                    code_updated = Git.reset(s_dir)
+                except Exception as e: 
+                    Output.error(f"Could not update repository for [bold italic]{s_name}[/]", exception=e)
 
+        # 2. Build conditionally based on code changes or missing image
         if build:
-            with console.status(f"Building [bold italic]{s_name}[/]..."): Docker.compose_build(SERVICES_PATH, s_name)
+            if code_updated or force:
+                with console.status(f"Building [bold italic]{s_name}[/]..."): Docker.compose_build(SERVICES_PATH, s_name)
+        
         elif image == f"foundation/{s_name}":
-            with console.status(f"Building [bold italic]{s_name}[/] from source..."):
-                Railpack.prepare(s_dir, s_dir / "railpack-plan.json")
-                Docker.build_from_railpack_plan(f"foundation/{s_name}", s_dir, s_dir / "railpack-plan.json")
+            # Check if the image exists locally so we don't skip the very first build
+            image_exists = subprocess.run(["docker", "image", "inspect", image], capture_output=True).returncode == 0
+            
+            if code_updated or not image_exists or force:
+                with console.status(f"Building [bold italic]{s_name}[/] from source..."):
+                    Railpack.prepare(s_dir, s_dir / "railpack-plan.json")
+                    Docker.build_from_railpack_plan(f"foundation/{s_name}", s_dir, s_dir / "railpack-plan.json")
         else:
             with console.status(f"Pulling [bold italic]{s_name}[/]..."): Docker.compose_pull(SERVICES_PATH, s_name)
 
