@@ -298,7 +298,12 @@ def init(default_email: Annotated[str, typer.Option(help="Default email address 
             "nginx-proxy": {
                 "container_name": "nginx-proxy",
                 "image": "nginxproxy/nginx-proxy",
-                "volumes": ["certs:/etc/nginx/certs", "html:/usr/share/nginx/html", "/var/run/docker.sock:/tmp/docker.sock:ro"],
+                "volumes": [
+                    "certs:/etc/nginx/certs", 
+                    "html:/usr/share/nginx/html", 
+                    "vhost.d:/etc/nginx/vhost.d",
+                    "/var/run/docker.sock:/tmp/docker.sock:ro"
+                ],
                 "ports": ["80:80", "443:443"],
                 "networks": ["foundation_network"],
                 "restart": "unless-stopped"
@@ -306,17 +311,20 @@ def init(default_email: Annotated[str, typer.Option(help="Default email address 
             "nginx-proxy-acme": {
                 "container_name": "nginx-proxy-acme",
                 "image": "nginxproxy/acme-companion",
-                "environment": {"DEFAULT_EMAIL": default_email},
+                "environment": {
+                    "DEFAULT_EMAIL": default_email,
+                    "NGINX_PROXY_CONTAINER": "nginx-proxy"
+                },
                 "volumes": ["/var/run/docker.sock:/var/run/docker.sock:ro", "acme:/etc/acme.sh"],
                 "volumes_from": ["nginx-proxy"],
                 "networks": ["foundation_network"],
                 "restart": "unless-stopped"
             }
         },
-        "volumes": {"certs": {}, "html": {}, "acme": {}},
+        "volumes": {"certs": {}, "html": {}, "vhost.d": {}, "acme": {}},
         "networks": {"foundation_network": {"name": "foundation_network"}}
     }
-
+    
     services_compose = {
         "name": "foundation-services",
         "services": services, "volumes": volumes,
